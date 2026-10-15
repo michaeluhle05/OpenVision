@@ -1,0 +1,108 @@
+name: Windows-to-iPhone OpenVision build
+
+# Experimental unsigned device build.
+# It DOES NOT sign an application with an Apple account and DOES NOT provision a Meta app.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - chatgpt/windows-ios-build
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ios-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Check out OpenVision
+        uses: actions/checkout@v4
+
+      - name: Pick an available Xcode and show version
+        shell: bash
+        run: |
+          shopt -s nullglob
+          matches=(/Applications/Xcode_27*.app/Contents/Developer)
+          if (( ${#matches[@]} )); then
+            echo "DEVELOPER_DIR=${matches[-1]}" >> "$GITHUB_ENV"
+            export DEVELOPER_DIR="${matches[-1]}"
+          fi
+          echo "Active Xcode:"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          echo "Other Xcode installations:"
+          ls -d /Applications/Xcode*.app || true
+
+      - name: Create non-secret build placeholders
+        shell: bash
+        run: |
+          cp Config.xcconfig.example Config.xcconfig
+          cp OpenVision/Config/Config.swift.example OpenVision/Config/Config.swift
+          # Placeholder values compile but DO NOT allow Meta glasses registration.
+          cat > Config.xcconfig <<'CONFIG'
+          DEVELOPMENT_TEAM =
+          PRODUCT_BUNDLE_IDENTIFIER = com.michaeluhle05.openvision
+          META_APP_ID = 0000000000
+          CLIENT_TOKEN = AR|0000000000|PLACEHOLDER
+          APP_LINK_URL_SCHEME = openvision
+          CONFIG
+
+      - name: Install Metal toolchain if needed
+        shell: bash
+        run: |
+          xcodebuild -downloadComponent MetalToolchain
+
+      - name: Build unsigned iPhone app
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project OpenVision.xcodeproj \
+            -scheme OpenVision \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath DerivedData \
+            -clonedSourcePackagesDirPath .spm \
+            -skipMacroValidation \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            2>&1 | tee openvision-build.log
+
+      - name: Package unsigned .ipa for testing only
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="DerivedData/Build/Products/Debug-iphoneos/OpenVision.app"
+          test -d "$app"
+          mkdir -p artifacts/Payload
+          cp -R "$app" artifacts/Payload/OpenVision.app
+          cd artifacts
+          ditto -c -k --sequesterRsrc --keepParent Payload OpenVision-UNSIGNED.ipa
+          rm -rf Payload
+          echo "Unsigned IPA packaged. This is NOT a ready-to-install signed release."
+
+      - name: Upload unsigned build
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenVision-unsigned-iPhone-build
+          path: artifacts/OpenVision-UNSIGNED.ipa
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload compilation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenVision-compilation-log
+          path: openvision-build.log
+          retention-days: 7
+          if-no-files-found: ignore
